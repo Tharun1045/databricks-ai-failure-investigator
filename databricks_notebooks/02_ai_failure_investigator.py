@@ -20,8 +20,8 @@ from datetime import datetime, timezone
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
-from pyspark.sql import Row
 from pyspark.sql.functions import current_timestamp
+from pyspark.sql.types import DoubleType, StringType, StructField, StructType
 
 # COMMAND ----------
 
@@ -579,10 +579,6 @@ def fallback_analysis(context: dict) -> dict:
     }
 
 
-prompt = build_prompt(failure_context)
-
-# COMMAND ----------
-
 analysis_errors = []
 openai_api_key = get_openai_api_key()
 
@@ -611,28 +607,55 @@ analysis
 # COMMAND ----------
 
 report_row = {
-    "job_id": job_id,
-    "job_run_id": job_run_id,
-    "job_name": job_name,
-    "failed_task_key": failed_task_key,
-    "pipeline_name": failure_context.get("pipeline_name"),
-    "notebook_path": failure_context.get("notebook_path"),
-    "failure_type": analysis.get("failure_type"),
-    "severity": analysis.get("severity"),
-    "root_cause": analysis.get("root_cause"),
+    "job_id": str(job_id or ""),
+    "job_run_id": str(job_run_id or ""),
+    "job_name": str(job_name or ""),
+    "failed_task_key": str(failed_task_key or ""),
+    "pipeline_name": str(failure_context.get("pipeline_name") or ""),
+    "notebook_path": str(failure_context.get("notebook_path") or ""),
+    "failure_type": str(analysis.get("failure_type") or ""),
+    "severity": str(analysis.get("severity") or ""),
+    "root_cause": str(analysis.get("root_cause") or ""),
     "evidence_json": json.dumps(analysis.get("evidence", []), ensure_ascii=False),
     "location_json": json.dumps(analysis.get("location", {}), ensure_ascii=False),
     "static_code_analysis_json": json.dumps(static_code_analysis, ensure_ascii=False),
-    "suggested_fix": analysis.get("suggested_fix"),
+    "suggested_fix": str(analysis.get("suggested_fix") or ""),
     "prevention_steps_json": json.dumps(analysis.get("prevention_steps", []), ensure_ascii=False),
     "confidence": float(analysis.get("confidence", 0.0)),
-    "analysis_source": analysis_source,
-    "openai_model": openai_model if analysis_source == "openai_codex_responses_api" else None,
+    "analysis_source": str(analysis_source or ""),
+    "openai_model": str(openai_model if analysis_source == "openai_codex_responses_api" else ""),
     "raw_failure_context_json": json.dumps(failure_context, ensure_ascii=False),
     "created_at_utc": datetime.now(timezone.utc).isoformat(),
 }
 
-report_df = spark.createDataFrame([Row(**report_row)]).withColumn("created_at", current_timestamp())
+report_schema = StructType(
+    [
+        StructField("job_id", StringType(), True),
+        StructField("job_run_id", StringType(), True),
+        StructField("job_name", StringType(), True),
+        StructField("failed_task_key", StringType(), True),
+        StructField("pipeline_name", StringType(), True),
+        StructField("notebook_path", StringType(), True),
+        StructField("failure_type", StringType(), True),
+        StructField("severity", StringType(), True),
+        StructField("root_cause", StringType(), True),
+        StructField("evidence_json", StringType(), True),
+        StructField("location_json", StringType(), True),
+        StructField("static_code_analysis_json", StringType(), True),
+        StructField("suggested_fix", StringType(), True),
+        StructField("prevention_steps_json", StringType(), True),
+        StructField("confidence", DoubleType(), True),
+        StructField("analysis_source", StringType(), True),
+        StructField("openai_model", StringType(), True),
+        StructField("raw_failure_context_json", StringType(), True),
+        StructField("created_at_utc", StringType(), True),
+    ]
+)
+
+report_df = spark.createDataFrame([report_row], schema=report_schema).withColumn(
+    "created_at",
+    current_timestamp(),
+)
 
 if not target_catalog:
     raise ValueError(
