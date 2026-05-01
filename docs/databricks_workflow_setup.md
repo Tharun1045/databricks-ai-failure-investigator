@@ -74,7 +74,7 @@ job_id = {{job.id}}
 job_run_id = {{job.run_id}}
 job_name = {{job.name}}
 failed_task_key = failing_pipeline_demo
-target_catalog =
+target_catalog = demo_catalog
 target_schema = observability
 target_table = databricks_failure_reports
 ```
@@ -82,12 +82,17 @@ target_table = databricks_failure_reports
 For Unity Catalog, use:
 
 ```text
-target_catalog = main
+target_catalog = demo_catalog
 target_schema = observability
 target_table = databricks_failure_reports
+openai_secret_scope = openai
+openai_secret_key = OPENAI_API_KEY
+openai_model = gpt-5.1-codex-max
 ```
 
-Use a different catalog if your workspace does not allow table creation in `main`.
+Use a different catalog if your workspace does not allow table creation in `demo_catalog`.
+
+Create a Databricks secret for your OpenAI API key before using Codex analysis. For example, create a secret scope named `openai` and store the key as `OPENAI_API_KEY`. If the secret is not configured, the workflow still runs with fallback rules.
 
 ## Step 4: Run The Job
 
@@ -99,15 +104,15 @@ Expected behavior:
 2. `ai_failure_investigator` runs because its condition is `At least one failed`.
 3. The investigator reads failure context from Databricks task values.
 4. If task values are missing, it calls the Databricks Jobs API to fetch failed task output.
-5. It calls `ai_gen()` if available.
-6. If `ai_gen()` is unavailable, it uses fallback rules.
+5. It calls OpenAI/Codex through the Responses API if an OpenAI secret is configured.
+6. If OpenAI is unavailable, it uses fallback rules.
 7. It writes a report to a Unity Catalog Delta table.
 
 ## Step 5: View The Incident Report
 
 ```sql
 SELECT *
-FROM main.observability.databricks_failure_reports
+FROM demo_catalog.observability.databricks_failure_reports
 ORDER BY created_at DESC;
 ```
 

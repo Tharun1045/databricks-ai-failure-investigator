@@ -14,8 +14,9 @@ This project creates a Databricks-native failure investigation workflow:
 2. A downstream investigator task runs only when the first task fails.
 3. The investigator first tries to read failure context from Databricks task values.
 4. If task values were not written, it falls back to the Databricks Jobs API and reads the failed task output.
-5. The investigator uses Databricks `ai_gen()` when available.
-6. The investigator writes a structured incident report to a Unity Catalog Delta table.
+5. The investigator calls OpenAI/Codex through the Responses API when an OpenAI secret is configured.
+6. If OpenAI is unavailable, it uses local fallback rules.
+7. The investigator writes a structured incident report to a Unity Catalog Delta table.
 
 ## Project Structure
 
@@ -57,14 +58,11 @@ The AI logic is written in:
 databricks_notebooks/02_ai_failure_investigator.py
 ```
 
-It builds a prompt from the failed task context and calls Databricks AI:
+It builds a prompt from the failed task context and calls OpenAI/Codex through the Responses API when configured.
 
-```sql
-SELECT ai_gen(prompt) AS analysis_json
-FROM failure_investigation_prompt
-```
+If OpenAI is not configured or the API call fails, the notebook uses local fallback rules so the workflow still writes a useful Delta report.
 
-If `ai_gen()` is not available in your workspace, the notebook uses fallback rules so the workflow still writes a useful Delta report.
+Your Codex subscription in the app is separate from Databricks. To use OpenAI/Codex inside Databricks, store an OpenAI API key in a Databricks secret and pass its scope/key to the investigator task.
 
 The investigator supports two context paths:
 

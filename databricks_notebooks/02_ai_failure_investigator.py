@@ -9,7 +9,7 @@
 # MAGIC - **Depends on:** `failing_pipeline_demo`
 # MAGIC - **Run if:** `At least one failed`
 # MAGIC
-# MAGIC It reads failure context from Databricks task values, analyzes the error with Databricks `ai_gen()` when available, and writes an incident report to Delta.
+# MAGIC It reads failure context from Databricks task values, analyzes the error with OpenAI/Codex when configured, and writes an incident report to a Unity Catalog Delta table.
 
 # COMMAND ----------
 
@@ -29,9 +29,12 @@ dbutils.widgets.text("job_id", "")
 dbutils.widgets.text("job_run_id", "")
 dbutils.widgets.text("job_name", "")
 dbutils.widgets.text("failed_task_key", "failing_pipeline_demo")
-dbutils.widgets.text("target_catalog", "main")
+dbutils.widgets.text("target_catalog", "demo_catalog")
 dbutils.widgets.text("target_schema", "observability")
 dbutils.widgets.text("target_table", "databricks_failure_reports")
+dbutils.widgets.text("openai_secret_scope", "")
+dbutils.widgets.text("openai_secret_key", "OPENAI_API_KEY")
+dbutils.widgets.text("openai_model", "gpt-5.1-codex-max")
 
 job_id = dbutils.widgets.get("job_id")
 job_run_id = dbutils.widgets.get("job_run_id")
@@ -40,6 +43,9 @@ failed_task_key = dbutils.widgets.get("failed_task_key")
 target_catalog = dbutils.widgets.get("target_catalog").strip()
 target_schema = dbutils.widgets.get("target_schema").strip()
 target_table = dbutils.widgets.get("target_table").strip()
+openai_secret_scope = dbutils.widgets.get("openai_secret_scope").strip()
+openai_secret_key = dbutils.widgets.get("openai_secret_key").strip()
+openai_model = dbutils.widgets.get("openai_model").strip()
 
 # COMMAND ----------
 
@@ -85,6 +91,15 @@ def databricks_api_get_text(path: str, params: dict) -> str:
     )
     with urlopen(request, timeout=30) as response:
         return response.read().decode("utf-8")
+
+
+def get_openai_api_key() -> str | None:
+    if not openai_secret_scope or not openai_secret_key:
+        return None
+    try:
+        return dbutils.secrets.get(scope=openai_secret_scope, key=openai_secret_key)
+    except Exception:
+        return None
 
 
 PYSPARK_SQL_FUNCTIONS = {
@@ -180,7 +195,7 @@ def analyze_pyspark_imports(source: str | None) -> dict:
             "text": exc.text.strip() if exc.text else None,
             "message": exc.msg,
         }
-        for match in re.finditer(r"\b([A-Za-z_]\w*)\s*\(", clean_source):
+        for match in re.finditer(r"(?<!\.)\b([A-Za-z_]\w*)\s*\(", clean_source):
             function_name = match.group(1)
             used_names.add(function_name)
             if function_name in PYSPARK_SQL_FUNCTIONS:
@@ -191,7 +206,7 @@ def analyze_pyspark_imports(source: str | None) -> dict:
                         "code": source_line(clean_source, line_number),
                     }
                 )
-        for match in re.finditer(r"from\s+pyspark\.sql\.functions\s+import\s+([^\n]*)", clean_source):
+        for match in re.finditer(r"from[ \t]+pyspark\.sql\.functions[ \t]+import[ \t]*([^\n]*)", clean_source):
             imported_part = match.group(1).strip()
             import_line = clean_source[: match.start()].count("\n") + 1
             if imported_part == "*":
@@ -347,6 +362,42 @@ Failure context:
 """.strip()
 
 
+def analyze_with_openai_codex(context: dict, api_key: str, model: str) -> dict:
+    payload = {
+        "model": model,
+        "instructions": (
+            "You are Codex acting as a senior Databricks data platform engineer. "
+            "Analyze failed Databricks notebooks by reading the error, traceback, "
+            "static code analysis, and notebook source excerpt. Return only valid JSON."
+        ),
+        "input": build_prompt(context),
+        "text": {"format": {"type": "json_object"}},
+    }
+    request = Request(
+        "https://api.openai.com/v1/responses",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    with urlopen(request, timeout=90) as response:
+        response_payload = json.loads(response.read().decode("utf-8"))
+
+    output_text = response_payload.get("output_text")
+    if output_text:
+        return extract_json(output_text)
+
+    for item in response_payload.get("output", []):
+        if item.get("type") == "message":
+            for content in item.get("content", []):
+                if content.get("type") == "output_text":
+                    return extract_json(content.get("text", ""))
+
+    raise ValueError("OpenAI response did not contain output_text.")
+
+
 def extract_json(text: str) -> dict:
     cleaned = text.strip()
     cleaned = re.sub(r"^```json\s*", "", cleaned)
@@ -425,7 +476,7 @@ def fallback_analysis(context: dict) -> dict:
         if line and code:
             existing_import_summary.append(f"line {line}: {code}")
 
-    if re.search(r"from\s+pyspark\.sql\.functions\s+import\s*(\n|$)", raw_error_message):
+    if static_analysis.get("syntax_error") and (static_analysis.get("syntax_error") or {}).get("text", "").startswith("from pyspark.sql.functions import"):
         failure_type = "python_syntax_error"
         root_cause = (
             "The notebook has an incomplete import statement: "
@@ -443,7 +494,7 @@ def fallback_analysis(context: dict) -> dict:
             "Add a lightweight syntax check in CI before syncing notebooks to Databricks.",
         ]
         confidence = 0.94
-    elif "syntaxerror" in error_message and "import" in error_message:
+    elif "syntaxerror" in error_message and ("import" in error_message or syntax_error):
         failure_type = "python_syntax_error"
         root_cause = "The notebook failed because of invalid Python import syntax."
         suggested_fix = (
@@ -532,24 +583,28 @@ prompt = build_prompt(failure_context)
 
 # COMMAND ----------
 
-analysis_source = "databricks_ai_gen"
+analysis_errors = []
+openai_api_key = get_openai_api_key()
 
-try:
-    prompt_df = spark.createDataFrame([Row(prompt=prompt)])
-    prompt_df.createOrReplaceTempView("failure_investigation_prompt")
+if openai_api_key:
+    try:
+        analysis = analyze_with_openai_codex(failure_context, openai_api_key, openai_model)
+        analysis_source = "openai_codex_responses_api"
+    except Exception as exc:
+        analysis_errors.append(f"openai_codex_error: {exc}")
+        analysis = None
+        analysis_source = None
+else:
+    analysis_errors.append("openai_codex_skipped: openai_secret_scope/openai_secret_key not configured")
+    analysis = None
+    analysis_source = None
 
-    ai_text = spark.sql(
-        """
-        SELECT ai_gen(prompt) AS analysis_json
-        FROM failure_investigation_prompt
-        """
-    ).collect()[0]["analysis_json"]
-
-    analysis = extract_json(ai_text)
-except Exception as exc:
-    analysis_source = "fallback_rules"
+if analysis is None:
     analysis = fallback_analysis(failure_context)
-    analysis["ai_error"] = str(exc)
+    analysis_source = "fallback_rules"
+
+if analysis_errors:
+    analysis["analysis_errors"] = analysis_errors
 
 analysis
 
@@ -572,6 +627,7 @@ report_row = {
     "prevention_steps_json": json.dumps(analysis.get("prevention_steps", []), ensure_ascii=False),
     "confidence": float(analysis.get("confidence", 0.0)),
     "analysis_source": analysis_source,
+    "openai_model": openai_model if analysis_source == "openai_codex_responses_api" else None,
     "raw_failure_context_json": json.dumps(failure_context, ensure_ascii=False),
     "created_at_utc": datetime.now(timezone.utc).isoformat(),
 }
@@ -594,6 +650,7 @@ display(report_df)
 # COMMAND ----------
 
 print(f"Saved AI failure report to {table_identifier}")
+
 
 
 

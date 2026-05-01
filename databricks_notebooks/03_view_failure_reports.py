@@ -6,7 +6,7 @@
 
 # COMMAND ----------
 
-dbutils.widgets.text("target_catalog", "main")
+dbutils.widgets.text("target_catalog", "demo_catalog")
 dbutils.widgets.text("target_schema", "observability")
 dbutils.widgets.text("target_table", "databricks_failure_reports")
 
@@ -38,5 +38,6 @@ display(
         "root_cause",
         "suggested_fix",
         "analysis_source",
+        "openai_model",
     )
 )
