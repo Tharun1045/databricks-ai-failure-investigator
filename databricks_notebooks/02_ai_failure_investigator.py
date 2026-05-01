@@ -16,6 +16,8 @@
 import json
 import re
 from datetime import datetime, timezone
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
 
 from pyspark.sql import Row
 from pyspark.sql.functions import current_timestamp
@@ -26,7 +28,7 @@ dbutils.widgets.text("job_id", "")
 dbutils.widgets.text("job_run_id", "")
 dbutils.widgets.text("job_name", "")
 dbutils.widgets.text("failed_task_key", "failing_pipeline_demo")
-dbutils.widgets.text("target_catalog", "")
+dbutils.widgets.text("target_catalog", "main")
 dbutils.widgets.text("target_schema", "observability")
 dbutils.widgets.text("target_table", "databricks_failure_reports")
 
@@ -56,13 +58,93 @@ debug_failure_context = json.dumps(
     }
 )
 
-failure_context_raw = dbutils.jobs.taskValues.get(
-    taskKey=failed_task_key,
-    key="failure_context",
-    debugValue=debug_failure_context,
-)
+def databricks_api_get(path: str, params: dict) -> dict:
+    context = dbutils.notebook.entry_point.getDbutils().notebook().getContext()
+    api_url = context.apiUrl().get().rstrip("/")
+    api_token = context.apiToken().get()
+    query = urlencode(params)
+    request = Request(
+        f"{api_url}{path}?{query}",
+        headers={"Authorization": f"Bearer {api_token}"},
+        method="GET",
+    )
+    with urlopen(request, timeout=30) as response:
+        return json.loads(response.read().decode("utf-8"))
 
-failure_context = json.loads(failure_context_raw)
+
+def collect_failure_context_from_jobs_api(root_run_id: str, task_key: str) -> dict:
+    if not root_run_id:
+        raise ValueError("job_run_id parameter is required for Jobs API fallback.")
+
+    run = databricks_api_get(
+        "/api/2.1/jobs/runs/get",
+        {"run_id": root_run_id, "include_history": "true"},
+    )
+
+    failed_task = None
+    for task in run.get("tasks", []):
+        state = task.get("state", {})
+        if task.get("task_key") == task_key or state.get("result_state") == "FAILED":
+            failed_task = task
+            if task.get("task_key") == task_key:
+                break
+
+    if not failed_task:
+        raise ValueError(f"No failed task found in job run {root_run_id}.")
+
+    task_run_id = failed_task.get("run_id")
+    output = {}
+    if task_run_id:
+        output = databricks_api_get(
+            "/api/2.1/jobs/runs/get-output",
+            {"run_id": task_run_id},
+        )
+
+    state = failed_task.get("state", {})
+    notebook_path = failed_task.get("notebook_task", {}).get("notebook_path")
+    error_message = (
+        output.get("error")
+        or output.get("error_trace")
+        or state.get("state_message")
+        or run.get("state", {}).get("state_message")
+        or "No error output was returned by the Jobs API."
+    )
+
+    return {
+        "pipeline_name": job_name or run.get("run_name"),
+        "source_name": "databricks_jobs_api",
+        "target_name": "unknown",
+        "failure_type_hint": "unknown",
+        "error_class": "DatabricksJobFailure",
+        "error_message": str(error_message)[:12000],
+        "notebook_path": notebook_path,
+        "failed_task_key": failed_task.get("task_key"),
+        "task_run_id": task_run_id,
+        "job_run_id": root_run_id,
+        "job_id": job_id or run.get("job_id"),
+        "run_page_url": run.get("run_page_url"),
+        "code_snippet": "Source code was not captured before failure. Review the failed notebook path and stack trace.",
+        "captured_at_utc": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+try:
+    failure_context_raw = dbutils.jobs.taskValues.get(
+        taskKey=failed_task_key,
+        key="failure_context",
+        debugValue=debug_failure_context,
+    )
+    failure_context = json.loads(failure_context_raw)
+    context_source = "task_values"
+except Exception as task_value_exc:
+    try:
+        failure_context = collect_failure_context_from_jobs_api(job_run_id, failed_task_key)
+        context_source = f"jobs_api_fallback: {task_value_exc}"
+    except Exception as api_exc:
+        failure_context = json.loads(debug_failure_context)
+        context_source = f"debug_fallback: task_values={task_value_exc}; jobs_api={api_exc}"
+
+failure_context["context_source"] = context_source
 failure_context
 
 # COMMAND ----------
@@ -185,12 +267,14 @@ report_row = {
 
 report_df = spark.createDataFrame([Row(**report_row)]).withColumn("created_at", current_timestamp())
 
-if target_catalog:
-    table_identifier = f"`{target_catalog}`.`{target_schema}`.`{target_table}`"
-    spark.sql(f"CREATE SCHEMA IF NOT EXISTS `{target_catalog}`.`{target_schema}`")
-else:
-    table_identifier = f"`{target_schema}`.`{target_table}`"
-    spark.sql(f"CREATE SCHEMA IF NOT EXISTS `{target_schema}`")
+if not target_catalog:
+    raise ValueError(
+        "target_catalog is required for Unity Catalog mode. "
+        "Use `main` or another catalog where the job identity has permission."
+    )
+
+table_identifier = f"`{target_catalog}`.`{target_schema}`.`{target_table}`"
+spark.sql(f"CREATE SCHEMA IF NOT EXISTS `{target_catalog}`.`{target_schema}`")
 
 report_df.write.mode("append").option("mergeSchema", "true").saveAsTable(table_identifier)
 
@@ -199,3 +283,6 @@ display(report_df)
 # COMMAND ----------
 
 print(f"Saved AI failure report to {table_identifier}")
+
+
+

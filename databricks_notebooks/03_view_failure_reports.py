@@ -6,7 +6,7 @@
 
 # COMMAND ----------
 
-dbutils.widgets.text("target_catalog", "")
+dbutils.widgets.text("target_catalog", "main")
 dbutils.widgets.text("target_schema", "observability")
 dbutils.widgets.text("target_table", "databricks_failure_reports")
 
@@ -14,10 +14,10 @@ target_catalog = dbutils.widgets.get("target_catalog").strip()
 target_schema = dbutils.widgets.get("target_schema").strip()
 target_table = dbutils.widgets.get("target_table").strip()
 
-if target_catalog:
-    table_identifier = f"`{target_catalog}`.`{target_schema}`.`{target_table}`"
-else:
-    table_identifier = f"`{target_schema}`.`{target_table}`"
+if not target_catalog:
+    raise ValueError("target_catalog is required for Unity Catalog mode.")
+
+table_identifier = f"`{target_catalog}`.`{target_schema}`.`{target_table}`"
 
 reports = spark.table(table_identifier).orderBy("created_at", ascending=False)
 display(reports)

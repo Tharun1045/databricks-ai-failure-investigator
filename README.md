@@ -12,9 +12,10 @@ This project creates a Databricks-native failure investigation workflow:
 
 1. A pipeline task fails intentionally.
 2. A downstream investigator task runs only when the first task fails.
-3. The investigator reads failure context from Databricks task values.
-4. The investigator uses Databricks `ai_gen()` when available.
-5. The investigator writes a structured incident report to Delta.
+3. The investigator first tries to read failure context from Databricks task values.
+4. If task values were not written, it falls back to the Databricks Jobs API and reads the failed task output.
+5. The investigator uses Databricks `ai_gen()` when available.
+6. The investigator writes a structured incident report to a Unity Catalog Delta table.
 
 ## Project Structure
 
@@ -65,6 +66,16 @@ FROM failure_investigation_prompt
 
 If `ai_gen()` is not available in your workspace, the notebook uses fallback rules so the workflow still writes a useful Delta report.
 
+The investigator supports two context paths:
+
+```text
+Best path:
+Failed notebook catches the exception -> writes failure_context task value -> re-raises error
+
+Fallback path:
+Failed notebook crashes before writing task values -> investigator calls Databricks Jobs API -> reads failed task output
+```
+
 ## Setup
 
 Follow:
@@ -80,11 +91,11 @@ No, not for the first version.
 The first goal is to prove this flow:
 
 ```text
-VS Code -> GitHub -> Databricks Git folder -> Databricks Job fails -> AI investigator runs -> Delta report saved
+VS Code -> GitHub -> Databricks Git folder -> Databricks Job fails -> AI investigator runs -> Unity Catalog Delta report saved
 ```
 
 Add GitHub Actions later for linting, tests, Databricks Asset Bundle validation, and automated deployment.
 
 ## Resume Bullet
 
-Built a Databricks-native AI failure investigation workflow that triggers after failed Lakeflow Job tasks, analyzes Spark errors and code context using Databricks AI Functions, and writes structured incident reports to Delta for observability and root-cause analysis.
+Built a Databricks-native AI failure investigation workflow that triggers after failed Lakeflow Job tasks, analyzes Spark errors and code context using Databricks AI Functions, and writes structured incident reports to Unity Catalog Delta tables for observability and root-cause analysis.

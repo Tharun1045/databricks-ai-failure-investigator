@@ -79,7 +79,15 @@ target_schema = observability
 target_table = databricks_failure_reports
 ```
 
-Leave `target_catalog` blank if you are not using Unity Catalog. If you have Unity Catalog and permission to create schemas in `main`, set `target_catalog = main`.
+For Unity Catalog, use:
+
+```text
+target_catalog = main
+target_schema = observability
+target_table = databricks_failure_reports
+```
+
+Use a different catalog if your workspace does not allow table creation in `main`.
 
 ## Step 4: Run The Job
 
@@ -90,21 +98,12 @@ Expected behavior:
 1. `failing_pipeline_demo` fails.
 2. `ai_failure_investigator` runs because its condition is `At least one failed`.
 3. The investigator reads failure context from Databricks task values.
-4. It calls `ai_gen()` if available.
-5. If `ai_gen()` is unavailable, it uses fallback rules.
-6. It writes a report to a Delta table.
+4. If task values are missing, it calls the Databricks Jobs API to fetch failed task output.
+5. It calls `ai_gen()` if available.
+6. If `ai_gen()` is unavailable, it uses fallback rules.
+7. It writes a report to a Unity Catalog Delta table.
 
 ## Step 5: View The Incident Report
-
-If you left `target_catalog` blank:
-
-```sql
-SELECT *
-FROM observability.databricks_failure_reports
-ORDER BY created_at DESC;
-```
-
-If you used Unity Catalog:
 
 ```sql
 SELECT *
