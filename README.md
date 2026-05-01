@@ -76,6 +76,11 @@ Fallback path:
 Failed notebook crashes before writing task values -> investigator calls Databricks Jobs API -> reads failed task output
 ```
 
+For import-related failures, the investigator also exports the failed notebook source,
+checks which `pyspark.sql.functions` are used, compares them with the actual imports,
+records the source lines where each function is used/imported, and stores the result in
+`static_code_analysis_json`.
+
 ## Setup
 
 Follow:

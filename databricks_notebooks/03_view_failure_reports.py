@@ -33,6 +33,8 @@ display(
         "failure_type",
         "severity",
         "confidence",
+        "location_json",
+        "static_code_analysis_json",
         "root_cause",
         "suggested_fix",
         "analysis_source",
