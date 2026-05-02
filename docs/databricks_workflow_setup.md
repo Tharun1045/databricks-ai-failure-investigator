@@ -55,8 +55,20 @@ Notebook path: databricks_notebooks/01_failing_pipeline_demo.py
 Compute: Serverless if available, otherwise a small job cluster
 ```
 
-### Task 2
+### Task 2 (Choose One)
 
+**Option A: Groq Failure Investigator (Recommended - Free)**
+```text
+Task name: groq_ai_failure_investigator
+Type: Notebook
+Source: Git provider / Workspace repo
+Notebook path: databricks_notebooks/04_groq_failure_investigator.py
+Depends on: failing_pipeline_demo
+Run if: At least one failed
+Compute: Same as Task 1
+```
+
+**Option B: Ollama + OpenAI Investigator**
 ```text
 Task name: ai_failure_investigator
 Type: Notebook
@@ -79,12 +91,28 @@ target_schema = observability
 target_table = databricks_failure_reports
 ```
 
-For Unity Catalog, use:
+### For Groq Investigator (Option A - Recommended)
 
 ```text
-target_catalog = demo_catalog
-target_schema = observability
-target_table = databricks_failure_reports
+# Groq API - Free, no credit card required
+# 1. Get API key: https://console.groq.com/
+# 2. Store in Databricks:
+#    databricks secrets create-scope groq
+#    databricks secrets put --scope groq --key GROQ_API_KEY
+groq_secret_scope = groq
+groq_secret_key = GROQ_API_KEY
+groq_model = llama-3.1-70b-versatile
+```
+
+### For Ollama + OpenAI Investigator (Option B)
+
+```text
+# Ollama - Must be hosted on a cloud VM reachable by Databricks
+# IMPORTANT: localhost won't work - Databricks runs in the cloud
+ollama_host = http://<your-ollama-server-ip>:11434
+ollama_model = qwen3.5:397b-cloud
+
+# OpenAI (fallback)
 openai_secret_scope = openai
 openai_secret_key = OPENAI_API_KEY
 openai_model = gpt-5.1-codex-max
@@ -92,21 +120,23 @@ openai_model = gpt-5.1-codex-max
 
 Use a different catalog if your workspace does not allow table creation in `demo_catalog`.
 
-Create a Databricks secret for your OpenAI API key before using Codex analysis. For example, create a secret scope named `openai` and store the key as `OPENAI_API_KEY`. If the secret is not configured, the workflow still runs with fallback rules.
-
 ## Step 4: Run The Job
 
 Click Run now.
 
-Expected behavior:
+### Expected Behavior (Groq Investigator)
 
-1. `failing_pipeline_demo` fails.
-2. `ai_failure_investigator` runs because its condition is `At least one failed`.
-3. The investigator reads failure context from Databricks task values.
-4. If task values are missing, it calls the Databricks Jobs API to fetch failed task output.
-5. It calls OpenAI/Codex through the Responses API if an OpenAI secret is configured.
-6. If OpenAI is unavailable, it uses fallback rules.
-7. It writes a report to a Unity Catalog Delta table.
+1. `failing_pipeline_demo` fails with a schema/column error.
+2. `groq_ai_failure_investigator` runs because its condition is `At least one failed`.
+3. The investigator reads failure context from Databricks task values (or Jobs API fallback).
+4. It exports the failed notebook source code via Databricks Workspace API.
+5. It sends the error context + code to Groq Cloud API (Llama 3.1 70B).
+6. Groq returns JSON analysis with root cause, fix, and prevention steps.
+7. The investigator writes a structured report to Unity Catalog Delta table.
+
+### Expected Behavior (Ollama + OpenAI Investigator)
+
+Same flow, but uses Ollama (if configured) or OpenAI Codex for analysis.
 
 ## Step 5: View The Incident Report
 

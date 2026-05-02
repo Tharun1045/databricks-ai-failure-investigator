@@ -1,15 +1,25 @@
 # Databricks notebook source
 # MAGIC %md
-# MAGIC # 02 - AI Failure Investigator
+# MAGIC # 04 - Groq AI Failure Investigator
 # MAGIC
-# MAGIC This notebook is designed to run after `01_failing_pipeline_demo` fails.
+# MAGIC This notebook analyzes Databricks job failures using **Groq Cloud API** (free, no credit card required).
 # MAGIC
-# MAGIC Configure this task in Databricks Workflows with:
+# MAGIC Groq provides ultra-fast inference for Llama, Mixtral, and Gemma models.
 # MAGIC
-# MAGIC - **Depends on:** `failing_pipeline_demo`
-# MAGIC - **Run if:** `At least one failed`
+# MAGIC ## Setup
 # MAGIC
-# MAGIC It reads failure context from Databricks task values, analyzes the error with OpenAI/Codex when configured, and writes an incident report to a Unity Catalog Delta table.
+# MAGIC 1. Get free API key: https://console.groq.com/
+# MAGIC 2. Store in Databricks Secrets:
+# MAGIC    ```bash
+# MAGIC    databricks secrets create-scope groq
+# MAGIC    databricks secrets put --scope groq --key GROQ_API_KEY
+# MAGIC    ```
+# MAGIC 3. Configure workflow parameters:
+# MAGIC    ```
+# MAGIC    groq_secret_scope = groq
+# MAGIC    groq_secret_key = GROQ_API_KEY
+# MAGIC    groq_model = llama-3.1-70b-versatile
+# MAGIC    ```
 
 # COMMAND ----------
 
@@ -23,6 +33,10 @@ from pyspark.sql.functions import current_timestamp
 from pyspark.sql.types import DoubleType, StringType, StructField, StructType
 
 # COMMAND ----------
+# MAGIC %md
+# MAGIC ## Notebook Parameters
+
+# COMMAND ----------
 
 dbutils.widgets.text("job_id", "")
 dbutils.widgets.text("job_run_id", "")
@@ -31,13 +45,10 @@ dbutils.widgets.text("failed_task_key", "failing_pipeline_demo")
 dbutils.widgets.text("target_catalog", "demo_catalog")
 dbutils.widgets.text("target_schema", "observability")
 dbutils.widgets.text("target_table", "databricks_failure_reports")
-# OpenAI configuration (optional)
-dbutils.widgets.text("openai_secret_scope", "")
-dbutils.widgets.text("openai_secret_key", "OPENAI_API_KEY")
-dbutils.widgets.text("openai_model", "gpt-5.1-codex-max")
-# Ollama configuration (optional - alternative to OpenAI)
-dbutils.widgets.text("ollama_host", "http://localhost:11434")
-dbutils.widgets.text("ollama_model", "qwen3.5:397b-cloud")
+# Groq configuration
+dbutils.widgets.text("groq_secret_scope", "groq")
+dbutils.widgets.text("groq_secret_key", "GROQ_API_KEY")
+dbutils.widgets.text("groq_model", "llama-3.1-70b-versatile")
 
 job_id = dbutils.widgets.get("job_id")
 job_run_id = dbutils.widgets.get("job_run_id")
@@ -46,11 +57,13 @@ failed_task_key = dbutils.widgets.get("failed_task_key")
 target_catalog = dbutils.widgets.get("target_catalog").strip()
 target_schema = dbutils.widgets.get("target_schema").strip()
 target_table = dbutils.widgets.get("target_table").strip()
-openai_secret_scope = dbutils.widgets.get("openai_secret_scope").strip()
-openai_secret_key = dbutils.widgets.get("openai_secret_key").strip()
-openai_model = dbutils.widgets.get("openai_model").strip()
-ollama_host = dbutils.widgets.get("ollama_host").strip()
-ollama_model = dbutils.widgets.get("ollama_model").strip()
+groq_secret_scope = dbutils.widgets.get("groq_secret_scope").strip()
+groq_secret_key = dbutils.widgets.get("groq_secret_key").strip()
+groq_model = dbutils.widgets.get("groq_model").strip()
+
+# COMMAND ----------
+# MAGIC %md
+# MAGIC ## Debug Failure Context (for testing without actual failure)
 
 # COMMAND ----------
 
@@ -70,7 +83,14 @@ debug_failure_context = json.dumps(
     }
 )
 
+# COMMAND ----------
+# MAGIC %md
+# MAGIC ## Helper Functions
+
+# COMMAND ----------
+
 def databricks_api_get(path: str, params: dict) -> dict:
+    """Call Databricks API to fetch job/task information."""
     context = dbutils.notebook.entry_point.getDbutils().notebook().getContext()
     api_url = context.apiUrl().get().rstrip("/")
     api_token = context.apiToken().get()
@@ -85,6 +105,7 @@ def databricks_api_get(path: str, params: dict) -> dict:
 
 
 def databricks_api_get_text(path: str, params: dict) -> str:
+    """Export notebook source code from Databricks Workspace."""
     context = dbutils.notebook.entry_point.getDbutils().notebook().getContext()
     api_url = context.apiUrl().get().rstrip("/")
     api_token = context.apiToken().get()
@@ -98,16 +119,18 @@ def databricks_api_get_text(path: str, params: dict) -> str:
         return response.read().decode("utf-8")
 
 
-def get_openai_api_key() -> str | None:
-    if not openai_secret_scope or not openai_secret_key:
+def get_groq_api_key() -> str | None:
+    """Retrieve Groq API key from Databricks Secrets."""
+    if not groq_secret_scope or not groq_secret_key:
         return None
     try:
-        return dbutils.secrets.get(scope=openai_secret_scope, key=openai_secret_key)
+        return dbutils.secrets.get(scope=groq_secret_scope, key=groq_secret_key)
     except Exception:
         return None
 
 
 def export_notebook_source(notebook_path: str) -> str | None:
+    """Export the failed notebook's source code for analysis."""
     if not notebook_path:
         return None
     try:
@@ -120,6 +143,7 @@ def export_notebook_source(notebook_path: str) -> str | None:
 
 
 def collect_failure_context_from_jobs_api(root_run_id: str, task_key: str) -> dict:
+    """Collect failure context from Databricks Jobs API when task values are unavailable."""
     if not root_run_id:
         raise ValueError("job_run_id parameter is required for Jobs API fallback.")
 
@@ -174,6 +198,11 @@ def collect_failure_context_from_jobs_api(root_run_id: str, task_key: str) -> di
         "captured_at_utc": datetime.now(timezone.utc).isoformat(),
     }
 
+# COMMAND ----------
+# MAGIC %md
+# MAGIC ## Collect Failure Context
+
+# COMMAND ----------
 
 try:
     failure_context_raw = dbutils.jobs.taskValues.get(
@@ -196,15 +225,19 @@ notebook_source = export_notebook_source(failure_context.get("notebook_path"))
 failure_context["context_source"] = context_source
 if notebook_source:
     failure_context["notebook_source_excerpt"] = notebook_source[:12000]
-failure_context
+
+display(failure_context)
+
+# COMMAND ----------
+# MAGIC %md
+# MAGIC ## Groq AI Analysis Functions
 
 # COMMAND ----------
 
 def build_prompt(context: dict) -> str:
+    """Build a detailed prompt for Groq/Llama to analyze the failure."""
     return f"""
 You are a Databricks production incident investigator specializing in PySpark notebook jobs and data pipeline failures.
-
-Read the failed notebook source, traceback, job metadata, and notebook source. Identify the exact failing cell or line, broken code, root cause, and safest production-ready fix.
 
 Analyze this failed Databricks pipeline task and return only valid JSON with:
 - failure_type
@@ -216,11 +249,9 @@ Analyze this failed Databricks pipeline task and return only valid JSON with:
 - prevention_steps
 - confidence
 
-Be specific and practical.
-
 Requirements:
 - Read the notebook source excerpt as real pipeline code, not just as a log message.
-- Identify the exact broken statement, function, import, table reference, column reference, or library dependency when evidence is available.
+- Identify the exact broken statement, function, import, table reference, column reference, or library dependency.
 - Explain why the code failed in plain engineering language.
 - If the traceback contains a notebook command/cell or line number, include it in `location`.
 - If the error is Python syntax or import syntax, explain the exact syntax issue.
@@ -237,20 +268,44 @@ Failure context:
 """.strip()
 
 
-def analyze_with_openai_codex(context: dict, api_key: str, model: str) -> dict:
+def analyze_with_groq(context: dict, api_key: str, model: str) -> dict:
+    """
+    Analyze failure using Groq Cloud API.
+    Groq provides ultra-fast inference for Llama, Mixtral, and Gemma models.
+
+    Available models:
+    - llama-3.1-70b-versatile (recommended)
+    - llama-3.1-8b-instant
+    - mixtral-8x7b-32768
+    - gemma2-9b-it
+    """
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are a Databricks production incident investigator specializing in PySpark notebook jobs "
+                "and data pipeline failures. Analyze the error context and code, then return ONLY valid JSON "
+                "with: failure_type, severity, root_cause, evidence (array), location (object with "
+                "cell/line/file/near), suggested_fix, prevention_steps (array), confidence (0-1 float). "
+                "No markdown, no explanations outside JSON."
+            )
+        },
+        {
+            "role": "user",
+            "content": build_prompt(context)
+        }
+    ]
+
     payload = {
         "model": model,
-        "instructions": (
-            "You are a Databricks production incident investigator specializing in PySpark notebook jobs "
-            "and data pipeline failures. Read the failed notebook source, traceback, job metadata, and "
-            "notebook source. Identify the exact failing cell or line, broken code, root cause, "
-            "and safest production-ready fix. Return only valid JSON."
-        ),
-        "input": build_prompt(context),
-        "text": {"format": {"type": "json_object"}},
+        "messages": messages,
+        "response_format": {"type": "json_object"},
+        "temperature": 0.1,
+        "max_tokens": 2048,
     }
+
     request = Request(
-        "https://api.openai.com/v1/responses",
+        "https://api.groq.com/openai/v1/chat/completions",
         data=json.dumps(payload).encode("utf-8"),
         headers={
             "Authorization": f"Bearer {api_key}",
@@ -258,58 +313,19 @@ def analyze_with_openai_codex(context: dict, api_key: str, model: str) -> dict:
         },
         method="POST",
     )
+
     with urlopen(request, timeout=90) as response:
         response_payload = json.loads(response.read().decode("utf-8"))
 
-    output_text = response_payload.get("output_text")
-    if output_text:
-        return extract_json(output_text)
-
-    for item in response_payload.get("output", []):
-        if item.get("type") == "message":
-            for content in item.get("content", []):
-                if content.get("type") == "output_text":
-                    return extract_json(content.get("text", ""))
-
-    raise ValueError("OpenAI response did not contain output_text.")
-
-
-def analyze_with_ollama(context: dict, host: str, model: str) -> dict:
-    """
-    Analyze failure using Ollama API (Qwen, Claude, or other local models).
-    Uses the /api/generate endpoint with JSON format.
-    """
-    prompt = build_prompt(context)
-
-    payload = {
-        "model": model,
-        "prompt": prompt,
-        "format": "json",
-        "stream": False,
-        "options": {
-            "temperature": 0.1,
-            "num_predict": 2048,
-        }
-    }
-
-    request = Request(
-        f"{host.rstrip('/')}/api/generate",
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-
-    with urlopen(request, timeout=120) as response:
-        response_payload = json.loads(response.read().decode("utf-8"))
-
-    response_text = response_payload.get("response", "")
+    response_text = response_payload.get("choices", [{}])[0].get("message", {}).get("content", "")
     if not response_text:
-        raise ValueError("Ollama response did not contain output.")
+        raise ValueError("Groq response did not contain output.")
 
     return extract_json(response_text)
 
 
 def extract_json(text: str) -> dict:
+    """Extract JSON from response text, handling markdown code blocks."""
     cleaned = text.strip()
     cleaned = re.sub(r"^```json\s*", "", cleaned)
     cleaned = re.sub(r"^```\s*", "", cleaned)
@@ -325,6 +341,7 @@ def extract_json(text: str) -> dict:
 
 
 def extract_failure_location(error_message: str) -> dict:
+    """Parse error message to extract file, line, and cell information."""
     location = {
         "cell": None,
         "line": None,
@@ -356,6 +373,10 @@ def extract_failure_location(error_message: str) -> dict:
 
 
 def fallback_analysis(context: dict) -> dict:
+    """
+    Fallback analysis when Groq API is unavailable.
+    Uses pattern matching on error messages to identify common failure types.
+    """
     raw_error_message = context.get("error_message", "")
     error_message = raw_error_message.lower()
     location = extract_failure_location(raw_error_message)
@@ -363,8 +384,8 @@ def fallback_analysis(context: dict) -> dict:
     if "syntaxerror" in error_message:
         failure_type = "python_syntax_error"
         severity = "high"
-        root_cause = "The notebook failed with a Python syntax error. Codex was unavailable, so only the Databricks traceback is available."
-        suggested_fix = "Review the failed cell/line in `location_json` and the notebook source excerpt in `raw_failure_context_json`, then fix the invalid Python syntax."
+        root_cause = "The notebook failed with a Python syntax error. Groq was unavailable, so only basic analysis is provided."
+        suggested_fix = "Review the failed cell/line in `location_json` and the notebook source excerpt, then fix the invalid Python syntax."
         confidence = 0.55
     elif "modulenotfounderror" in error_message or "no module named" in error_message:
         failure_type = "dependency_error"
@@ -376,12 +397,18 @@ def fallback_analysis(context: dict) -> dict:
         failure_type = "schema_or_column_error"
         severity = "high"
         root_cause = "The notebook references a column, field, or expression that Spark could not resolve."
-        suggested_fix = "Use Codex/OpenAI analysis for the exact code fix, or manually compare the failing expression with the source DataFrame/table schema."
+        suggested_fix = "Compare the failing column/expression with the source DataFrame/table schema. Check for typos or schema drift."
         confidence = 0.65
+    elif "analysisexception" in error_message:
+        failure_type = "schema_or_column_error"
+        severity = "high"
+        root_cause = "Spark AnalysisException indicates a query/column resolution issue."
+        suggested_fix = "Check column names match the source schema. Look for typos, missing aliases, or schema drift."
+        confidence = 0.6
     else:
         failure_type = "unknown"
         severity = "medium"
-        root_cause = "Codex was unavailable and fallback rules could not identify one clear root cause."
+        root_cause = "Groq was unavailable and fallback rules could not identify a specific root cause."
         suggested_fix = "Check `evidence_json`, `location_json`, and `raw_failure_context_json` for the failed notebook path, error message, and source excerpt."
         confidence = 0.25
 
@@ -393,38 +420,41 @@ def fallback_analysis(context: dict) -> dict:
         "location": location,
         "suggested_fix": suggested_fix,
         "prevention_steps": [
-            "Keep the OpenAI/Codex secret configured so full code-aware analysis can run.",
+            "Keep Groq API key configured for full AI-powered code analysis.",
             "Add notebook syntax checks before deploying workflow changes.",
             "Review Databricks job failures with the exported notebook source and traceback together.",
+            "Implement schema validation at pipeline boundaries.",
         ],
         "confidence": confidence,
     }
+
+# COMMAND ----------
+# MAGIC %md
+# MAGIC ## Run AI Analysis
+
+# COMMAND ----------
 
 analysis_errors = []
 analysis = None
 analysis_source = None
 
-# Priority 1: Ollama (Qwen/Claude via local API)
-if ollama_host and ollama_model:
+# Try Groq API first
+groq_api_key = get_groq_api_key()
+
+if groq_api_key:
     try:
-        analysis = analyze_with_ollama(failure_context, ollama_host, ollama_model)
-        analysis_source = "ollama_" + ollama_model.replace(":", "-")
+        analysis = analyze_with_groq(failure_context, groq_api_key, groq_model)
+        analysis_source = "groq_" + groq_model.replace("-", "_")
     except Exception as exc:
-        analysis_errors.append(f"ollama_error: {exc}")
+        analysis_errors.append(f"groq_error: {exc}")
+        analysis = None
+        analysis_source = None
+else:
+    analysis_errors.append("groq_skipped: groq_secret_scope/groq_secret_key not configured")
+    analysis = None
+    analysis_source = None
 
-# Priority 2: OpenAI Codex (if Ollama not configured or failed)
-if analysis is None:
-    openai_api_key = get_openai_api_key()
-    if openai_api_key:
-        try:
-            analysis = analyze_with_openai_codex(failure_context, openai_api_key, openai_model)
-            analysis_source = "openai_codex_responses_api"
-        except Exception as exc:
-            analysis_errors.append(f"openai_codex_error: {exc}")
-    else:
-        analysis_errors.append("openai_codex_skipped: openai_secret_scope/openai_secret_key not configured")
-
-# Priority 3: Fallback rules (if both AI services unavailable)
+# Fallback to rule-based analysis if Groq fails
 if analysis is None:
     analysis = fallback_analysis(failure_context)
     analysis_source = "fallback_rules"
@@ -432,7 +462,11 @@ if analysis is None:
 if analysis_errors:
     analysis["analysis_errors"] = analysis_errors
 
-analysis
+display(analysis)
+
+# COMMAND ----------
+# MAGIC %md
+# MAGIC ## Write Incident Report to Delta Table
 
 # COMMAND ----------
 
@@ -452,7 +486,7 @@ report_row = {
     "prevention_steps_json": json.dumps(analysis.get("prevention_steps", []), ensure_ascii=False),
     "confidence": float(analysis.get("confidence", 0.0)),
     "analysis_source": str(analysis_source or ""),
-    "ai_model": str(ollama_model if analysis_source.startswith("ollama") else (openai_model if analysis_source == "openai_codex_responses_api" else "")),
+    "ai_model": str(groq_model if analysis_source and analysis_source.startswith("groq") else ""),
     "raw_failure_context_json": json.dumps(failure_context, ensure_ascii=False),
     "created_at_utc": datetime.now(timezone.utc).isoformat(),
 }
@@ -499,12 +533,11 @@ report_df.write.mode("append").option("mergeSchema", "true").saveAsTable(table_i
 display(report_df)
 
 # COMMAND ----------
+# MAGIC %md
+# MAGIC ## Confirmation
+
+# COMMAND ----------
 
 print(f"Saved AI failure report to {table_identifier}")
-
-
-
-
-
-
-
+print(f"Analysis source: {analysis_source}")
+print(f"AI Model: {groq_model if analysis_source and analysis_source.startswith('groq') else 'N/A'}")

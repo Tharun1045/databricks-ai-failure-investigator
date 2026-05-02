@@ -40,29 +40,46 @@ Task 1: failing_pipeline_demo
   Runs databricks_notebooks/01_failing_pipeline_demo.py
   Expected result: Failed
 
-Task 2: ai_failure_investigator
-  Runs databricks_notebooks/02_ai_failure_investigator.py
+Task 2: ai_failure_investigator (choose one)
+  Option A: 02_ai_failure_investigator.py  (Ollama + OpenAI)
+  Option B: 04_groq_failure_investigator.py (Groq Cloud - Free, no credit card)
+  
   Depends on: failing_pipeline_demo
   Run if: At least one failed
   Expected result: Success
 
 Optional viewer:
-  databricks_notebooks/03_view_failure_reports.py
+  databricks_notebooks\03_view_failure_reports.py
 ```
 
 ## How AI Checks The Failure
 
-The AI logic is written in:
+### Option A: Groq Cloud (Recommended - Free, No Credit Card)
 
-```text
-databricks_notebooks/02_ai_failure_investigator.py
-```
+Use `databricks_notebooks/04_groq_failure_investigator.py`
 
-It builds a prompt from the failed task context and calls OpenAI/Codex through the Responses API when configured.
+1. Get free API key: https://console.groq.com/
+2. Store in Databricks Secrets:
+   ```bash
+   databricks secrets create-scope groq
+   databricks secrets put --scope groq --key GROQ_API_KEY
+   ```
+3. Configure workflow parameter: `groq_secret_scope = groq`
 
-If OpenAI is not configured or the API call fails, the notebook uses local fallback rules so the workflow still writes a useful Delta report.
+**Available models:**
+- `llama-3.1-70b-versatile` (recommended)
+- `llama-3.1-8b-instant`
+- `mixtral-8x7b-32768`
+- `gemma2-9b-it`
 
-Your Codex subscription in the app is separate from Databricks. To use OpenAI/Codex inside Databricks, store an OpenAI API key in a Databricks secret and pass its scope/key to the investigator task.
+### Option B: Ollama + OpenAI
+
+Use `databricks_notebooks/02_ai_failure_investigator.py`
+
+1. **Ollama** - Self-hosted on a cloud VM (Oracle Free Tier, EC2, etc.)
+2. **OpenAI** - Store API key in Databricks secrets
+
+Both notebooks write reports to the same Unity Catalog Delta table.
 
 The investigator supports two context paths:
 
@@ -74,10 +91,8 @@ Fallback path:
 Failed notebook crashes before writing task values -> investigator calls Databricks Jobs API -> reads failed task output
 ```
 
-For import-related failures, the investigator also exports the failed notebook source,
-checks which `pyspark.sql.functions` are used, compares them with the actual imports,
-records the source lines where each function is used/imported, and stores the result in
-`static_code_analysis_json`.
+For code-related failures, the investigator exports the failed notebook source
+and sends the source excerpt, traceback, job metadata, and notebook path to Codex.
 
 ## Setup
 
